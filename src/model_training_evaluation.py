@@ -1,26 +1,25 @@
 
 # Importo librerias
 import pandas as pd
+import numpy as np
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from  xgboost import XGBClassifier
 from catboost import CatBoostClassifier
-from ft_engineering import ft_engineering
 from sklearn.metrics import accuracy_score, f1_score, recall_score, roc_auc_score, precision_recall_curve, auc,classification_report
 from sklearn.model_selection import cross_validate
 from imblearn.over_sampling import SMOTE
+from ft_engineering import ft_engineering
 
 # defino función de modelos a evaluar
 
-
-
 def build_models():
     models = [
-        ("Logistic Regresion", LogisticRegression(max_iter=1000,random_state=42,)),
+        ("Logistic Regresion", LogisticRegression(max_iter=1000,random_state=42, class_weight="balanced")),
         ("RandomForest", RandomForestClassifier(n_estimators=100,random_state=42,class_weight="balanced")),
         ("GradientBoosting",GradientBoostingClassifier(n_estimators=100,random_state=42)),
-        ("XGBoost",XGBClassifier(random_state=42)),
-        ("CatBoost",CatBoostClassifier(scale_pos_weight=20))
+        ("XGBoost",XGBClassifier(scale_pos_weight=(5/95), random_state=42)),  
+        ("CatBoost",CatBoostClassifier(auto_class_weights='Balanced'))
 
     ]
     return models
@@ -43,106 +42,206 @@ def sumarize_classification(y_true, y_pred,y_scores=None):
         metrics['pr_auc'] = auc(recall, precision)
     return metrics
 
+def mostrar_importancia_variables(model, pipeline, top_n=10):
+
+    # 1) Obtener el transformador que genera las features finales
+    if 'preprocessor' in pipeline.named_steps:
+        preproc = pipeline.named_steps['preprocessor']
+    else:
+        # alternativa: pipeline[:-1] si el último paso es el estimador
+        preproc = pipeline[:-1]
+
+    # 2) Obtener nombres de features del preprocessor
+    try:
+        # Para ColumnTransformer con OneHotEncoder moderno
+        feature_names = preproc.get_feature_names_out()
+    except Exception:
+        # Fallback: intentar construir nombres manualmente
+        feature_names = []
+        if hasattr(preproc, 'transformers_'):
+            for name, trans, cols in preproc.transformers_:
+                if name == 'remainder' and trans == 'drop':
+                    continue
+                # si el transformer tiene get_feature_names_out
+                try:
+                    # obtener nombres de salida del transformer
+                    names = trans.get_feature_names_out(cols)
+                except Exception:
+                    # si no, usar los nombres de entrada (cols) tal cual
+                    if isinstance(cols, (list, tuple, np.ndarray)):
+                        names = [str(c) for c in cols]
+                    else:
+                        names = [str(cols)]
+                feature_names.extend(list(names))
+        else:
+            raise RuntimeError("No se pudo extraer nombres de features del preprocessor.")
+
+    # Asegurar que feature_names sea array
+    feature_names = np.array(feature_names)
+
+    # 3) Obtener importancias del modelo
+    if hasattr(model, 'feature_importances_'):
+        importances = model.feature_importances_
+    elif hasattr(model, 'coef_'):
+        coef = model.coef_
+        # manejar regresión/logística binaria y multiclase
+        if coef.ndim == 1:
+            importances = np.abs(coef)
+        else:
+            # tomar la norma L1 de coef por característica a través de clases
+            importances = np.sum(np.abs(coef), axis=0)
+    else:
+        raise AttributeError("El modelo no tiene 'feature_importances_' ni 'coef_'.")
+
+    # 4) Verificar longitud y ajustar si hay discrepancia
+    if importances.shape[0] != feature_names.shape[0]:
+        # intentar inferir si el preprocessor produjo columnas adicionales (OneHot)
+        # si no coinciden, lanzar advertencia y truncar/expandir de forma segura
+        min_len = min(importances.shape[0], feature_names.shape[0])
+        importances = importances[:min_len]
+        feature_names = feature_names[:min_len]
+
+    # 5) Crear DataFrame ordenado
+    df_imp = pd.DataFrame({
+        'feature': feature_names,
+        'importance': importances
+    }).sort_values('importance', ascending=False).reset_index(drop=True)
+
+    # 6) Mostrar top_n
+    display_df = df_imp.head(top_n)
+    print(display_df.to_string(index=False))
+
+    return df_imp
+
 # Defino función para entrenar y seleccionar el mejor modelo
 
-def train_and_select_model(X_train,y_train,X_test,y_test):
+def train_and_select_model(X_train, y_train, X_test, y_test, pipeline):
     models = build_models()
-    results =[]
-    for name,model in models:
-        # Validación cruzada
+    cv_results = []
+    global_results = []
+    report_results = []
+    modelos_entrenados = {}
+
+    for name, model in models:
+        # --- Validación cruzada ---
         cv_scores = cross_validate(
-            model,X_train,y_train,
+            model, X_train, y_train,
             cv=5,
             scoring=['f1', 'recall', 'precision'],
             return_train_score=False
         )
-        # Entrenar modelo con todos los datos de train
-        model.fit(X_train,y_train)
-        y_pred=model.predict(X_test)
 
-        # Probabilidades para ROC-AUC y PR-AUC
+        # --- Entrenar modelo ---
+        model.fit(X_train, y_train)
+        modelos_entrenados[name] = model  
+
+        y_pred = model.predict(X_test)
+
+        # --- Probabilidades ---
         try:
             y_scores = model.predict_proba(X_test)[:, 1]
         except AttributeError:
             y_scores = None
 
-        # Almacenar resultados
-        result ={
-            'name':name,
-            'model':model,
-            'cv_f1_mean': cv_scores['test_f1'].mean(),
-            'cv_f1_std': cv_scores['test_f1'].std(),
-            'cv_recall_mean': cv_scores['test_recall'].mean(),
-            'cv_recall_std': cv_scores['test_recall'].std(),
-            'cv_precision_mean': cv_scores['test_precision'].mean(),
-            'cv_precision_std': cv_scores['test_precision'].std(),
-            'test_metrics': sumarize_classification(y_test, y_pred, y_scores),
-            **sumarize_classification(y_test, y_pred, y_scores)
-        }
-        results.append(result)
-        # Convertir resultados a DataFrame
-        
-    df_results = pd.DataFrame(results)
-    pd.set_option('display.max_columns', None)
-    pd.set_option('display.width', None)
-    pd.set_option('display.max_colwidth', None)
-    print("\n📊 Resultados de modelos:\n",df_results)
+        # --- Métricas ---
+        metrics = sumarize_classification(y_test, y_pred, y_scores)
 
-    # Seleccionar mejor modelo según PR-AUC (si existe), si no por F1-score
-    if 'pr_auc' in df_results.columns:
-        best_model = df_results.loc[df_results['pr_auc'].idxmax()]
+        # --- Población de Tabla 1: Cross Validation ---
+        cv_results.append({
+            'Modelo': name,
+            'F1_mean': cv_scores['test_f1'].mean(),
+            'F1_std': cv_scores['test_f1'].std(),
+            'Recall_mean': cv_scores['test_recall'].mean(),
+            'Recall_std': cv_scores['test_recall'].std(),
+            'Precision_mean': cv_scores['test_precision'].mean(),
+            'Precision_std': cv_scores['test_precision'].std()
+        })
+
+        # --- Población de Tabla 2: Métricas globales ---
+        global_results.append({
+            'Modelo': name,
+            'Accuracy': metrics['accuracy'],
+            'F1-score': metrics['f1-score'],
+            'Recall': metrics['recall'],
+            'AUC': metrics['auc'],
+            'ROC-AUC': metrics.get('roc_auc', None),
+            'PR-AUC': metrics.get('pr_auc', None)
+        })
+
+        # --- Población de Tabla 3: Classification Report ---
+        report_results.append({
+            'Modelo': name,
+            'Classification Report': metrics['classification report']
+        })
+
+    # Convertir a DataFrames
+    df_cv = pd.DataFrame(cv_results)
+    df_global = pd.DataFrame(global_results)
+    df_report = pd.DataFrame(report_results)
+
+    # Mostrar resultados
+    mostrar_resultados(df_cv, df_global, df_report)
+
+    # Selección del mejor modelo
+    if df_global['PR-AUC'].notnull().any():
+        best_model_row = df_global.loc[df_global['PR-AUC'].idxmax()]
         criterio = "PR-AUC"
     else:
-        best_model = df_results.loc[df_results['f1-score'].idxmax()]
+        best_model_row = df_global.loc[df_global['F1-score'].idxmax()]
         criterio = "F1-score"
 
+    best_model_name = best_model_row['Modelo']
+    best_model = modelos_entrenados.get(best_model_name)
+
+    if best_model is None:
+        print(f" Nombre {best_model_name} no encontrado en modelos_entrenados. Claves disponibles: {list(modelos_entrenados.keys())}")
+    
+    # Mostrar importancia de variables automáticamente
+    mostrar_importancia_variables(best_model, pipeline, top_n=10)
+
     print(f"\n Mejor modelo seleccionado según {criterio}:")
-    print(best_model)
+    print(best_model_row)
 
-    return df_results, best_model
+    return df_cv, df_global, df_report, best_model_row, best_model
 
-# Preprocesar variables categoricas y numéricas Y entrenar modelos
+# Defino función para imprimir resultados en pantalla
+
+def mostrar_resultados(df_cv, df_global, df_report):
+    # --- Tabla 1: Cross Validation ---
+    print("\n" + "="*60)
+    print(" Resultados de Cross Validation")
+    print("="*60)
+    print(df_cv.to_string(index=False))  # muestra todo sin truncar
+
+    # --- Tabla 2: Métricas globales ---
+    print("\n" + "="*60)
+    print(" Métricas Globales en Test")
+    print("="*60)
+    print(df_global.to_string(index=False))
+
+    # --- Tabla 3: Classification Reports ---
+    print("\n" + "="*60)
+    print(" Classification Reports por Modelo")
+    print("="*60)
+    for _, row in df_report.iterrows():
+        print(f"\n--- {row['Modelo']} ---")
+        print(row['Classification Report'])
+
+
+# Preprocesamiento de variables categoricas y numéricas 
 
 # obtener datos preprocesados
-X_train, X_test, y_train, y_test, preprocessor = ft_engineering()
+X_train, X_test, y_train, y_test, pipeline = ft_engineering()
 
 # Aplicación de SMOTE para desbalanceo de clases
 
-
-
-# --- Paso 2: aplicar SMOTE solo en el conjunto de entrenamiento ---
 print("Distribución original:", y_train.value_counts(normalize=True))
 smote = SMOTE(random_state=42)
 X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
 
-# entrenar y comparar modelos
-df_results,best_model = train_and_select_model(X_train_res, y_train_res, X_test, y_test)
+# entrenamiento de modelos
+df_cv, df_global, df_report, best_model_row, best_model = train_and_select_model(X_train_res, y_train_res, X_test, y_test, pipeline)
 
-# Defino función para graficar Matrices de confusión 
-import matplotlib.pyplot as plt
-from sklearn.metrics import ConfusionMatrixDisplay
 
-def plot_confusion_matrices(best_models, X_test, y_test):
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    
-    for ax, (name, model) in zip(axes, best_models):
-        y_pred = model.predict(X_test)
-        disp = ConfusionMatrixDisplay.from_predictions(
-            y_test, y_pred, ax=ax, cmap="Blues", colorbar=False
-        )
-        ax.set_title(f"Matriz de Confusión - {name}")
-    
-    plt.suptitle("Comparación de los 2 mejores modelos", fontsize=16)
-    plt.tight_layout()
-    plt.show()
-# Graficar matrices de confusión de los mejores modelos 
-if 'pr_auc' in df_results.columns:
-    top2 = df_results.nlargest(2, 'pr_auc')
-else:
-    top2 = df_results.nlargest(2, 'f1-score')
 
-# Extraer los modelos entrenados
-best_models = [(row['name'], row['model']) for _, row in top2.iterrows()]
 
-# Graficar matrices de confusión
-plot_confusion_matrices(best_models, X_test, y_test)
