@@ -1,3 +1,4 @@
+# ft_engineering.py
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
@@ -7,113 +8,272 @@ from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
 from sklearn.base import BaseEstimator, TransformerMixin
 from cargar_datos import cargarDatos
+# ==========================================================
+# VARIABLES DEL MODELO
+# ==========================================================
 
+TARGET = "Pago_atiempo"
+
+FEATURES = [
+    'tipo_credito',
+    'capital_prestado',
+    'salario_cliente',
+    'plazo_meses',
+    'edad_cliente',
+    'tipo_laboral',
+    'puntaje_datacredito',
+    'huella_consulta',
+    'saldo_mora',
+    'saldo_total',
+    'creditos_sectorFinanciero',
+    'creditos_sectorCooperativo',
+    'creditos_sectorReal',
+    'tendencia_ingresos',
+    'puntaje'
+]
+
+NUMERIC_FEATURES = [
+    'capital_prestado',
+    'salario_cliente',
+    'plazo_meses',
+    'edad_cliente',
+    'puntaje_datacredito',
+    'huella_consulta',
+    'saldo_mora',
+    'saldo_total',
+    'creditos_sectorFinanciero',
+    'creditos_sectorCooperativo',
+    'creditos_sectorReal',
+    'puntaje'
+]
+
+CATEGORICAL_FEATURES = [
+    'tipo_credito',
+    'tipo_laboral',
+    'tendencia_ingresos'
+]
+
+# ==========================================================
+# LIMPIEZA PERSONALIZADA
+# ==========================================================
+
+class CustomCleaner(BaseEstimator, TransformerMixin):
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+
+        X = X.copy()
+
+        # salario = 0 -> NaN
+        if "salario_cliente" in X.columns:
+            X["salario_cliente"] = X["salario_cliente"].replace(0, np.nan)
+
+        # puntaje <=0 -> NaN
+        if "puntaje" in X.columns:
+            X["puntaje"] = X["puntaje"].mask(X["puntaje"] <= 0)
+
+        # puntaje_datacredito <=0 -> NaN
+        if "puntaje_datacredito" in X.columns:
+            X["puntaje_datacredito"] = X["puntaje_datacredito"].mask(
+                X["puntaje_datacredito"] <= 0
+            )
+
+        # tendencia_ingresos
+        if "tendencia_ingresos" in X.columns:
+
+            def limpiar_tendencia(valor):
+
+                if pd.isna(valor):
+                    return np.nan
+
+                try:
+                    float(str(valor).strip())
+                    return np.nan
+                except:
+                    return valor
+
+            X["tendencia_ingresos"] = X["tendencia_ingresos"].apply(
+                limpiar_tendencia
+            )
+
+        return X
+# ==========================================================
+# PIPELINE DE LIMPIEZA
+# ==========================================================
+
+def build_cleaning_pipeline():
+
+    numeric_pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy="median"))
+    ])
+
+    categorical_pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy="most_frequent"))
+    ])
+
+    cleaning_pipeline = Pipeline([
+
+        ("cleaner", CustomCleaner()),
+
+        ("imputer",
+
+            ColumnTransformer([
+
+                ("num", numeric_pipeline, NUMERIC_FEATURES),
+
+                ("cat", categorical_pipeline, CATEGORICAL_FEATURES)
+
+            ],
+            remainder="passthrough")
+
+        )
+
+    ])
+
+    return cleaning_pipeline
+
+# ==========================================================
+# PIPELINE DE PREPROCESAMIENTO
+# ==========================================================
+
+def build_preprocessing_pipeline():
+
+    numeric_pipeline = Pipeline([
+        ("scaler", StandardScaler())
+    ])
+
+    try:
+        encoder = OneHotEncoder(
+            handle_unknown="ignore",
+            sparse_output=False
+        )
+    except TypeError:
+        encoder = OneHotEncoder(
+            handle_unknown="ignore",
+            sparse=False
+        )
+
+    categorical_pipeline = Pipeline([
+        ("encoder", encoder)
+    ])
+
+    preprocessing = ColumnTransformer(
+
+        [
+
+            ("num", numeric_pipeline, NUMERIC_FEATURES),
+
+            ("cat", categorical_pipeline, CATEGORICAL_FEATURES)
+
+        ],
+
+        remainder="drop"
+
+    )
+
+    return preprocessing
+# ==========================================================
+# BUILD PIPELINE
+# ==========================================================
+
+def build_pipeline(df):
+
+    df = df.copy()
+
+    df = df[
+        (df["edad_cliente"] <= 100)
+        & (df["tipo_credito"] != 68)
+    ]
+
+    df = df[FEATURES + [TARGET]]
+
+    X = df[FEATURES]
+    y = df[TARGET]
+
+    cleaning_pipeline = build_cleaning_pipeline()
+
+    preprocessing_pipeline = build_preprocessing_pipeline()
+
+    return (
+        df,
+        X,
+        y,
+        cleaning_pipeline,
+        preprocessing_pipeline
+    )
+# ==========================================================
+# FEATURE ENGINEERING
+# ==========================================================
 
 def ft_engineering():
-    # cargar datos
+
     df = cargarDatos()
 
-    # Filtrar registros inválidos
-    df = df[(df['edad_cliente'] <= 100) & (df['tipo_credito'] != 68)].copy()
+    (
+        df,
+        X,
+        y,
+        cleaning_pipeline,
+        preprocessing_pipeline
+    ) = build_pipeline(df)
 
-    # Seleccion Variables relevantes
-    selected_features = [
-        'tipo_credito', 'capital_prestado', 'salario_cliente',
-        'plazo_meses', 'edad_cliente', 'tipo_laboral',
-        'puntaje_datacredito', 'huella_consulta',
-        'saldo_mora', 'saldo_total', 'creditos_sectorFinanciero',
-        'creditos_sectorCooperativo', 'creditos_sectorReal',
-        'tendencia_ingresos', 'Pago_atiempo', 'puntaje'
-    ]
-    df = df[selected_features]
-
-    # Definición de funciones de limpieza de valores vacios/nulos
-    def limpiar_salario(x):
-        return np.nan if x == 0 else x
-
-    def limpiar_puntaje(x):
-        return np.nan if x <= 0 else x
-
-    def limpiar_puntaje_datacredito(x):
-        return np.nan if x <= 0 else x
-
-    # Creación de un Transformador personalizado
-    class CustomCleaner(BaseEstimator, TransformerMixin):
-
-        def fit(self, X, y=None):
-            return self
-
-        def transform(self, X):
-            X = X.copy()
-
-            # Aplicar reglas de limpieza
-            if 'salario_cliente' in X.columns:
-                X['salario_cliente'] = X['salario_cliente'].apply(limpiar_salario)
-            if 'puntaje' in X.columns:
-                X['puntaje'] = X['puntaje'].apply(limpiar_puntaje)
-            if 'puntaje_datacredito' in X.columns:
-                X['puntaje_datacredito'] = X['puntaje_datacredito'].apply(limpiar_puntaje_datacredito)
-
-            # Asegurar que las categóricas sean strings (evita mezcla int/str)
-            for col in ['tipo_credito', 'tipo_laboral', 'tendencia_ingresos']:
-                if col in X.columns:
-                    X[col] = X[col].astype(str)
-
-            # NO eliminar columnas aquí si ColumnTransformer espera columnas concretas
-            return X
-
-    # split features/target
-    X = df.drop('Pago_atiempo', axis=1)
-    y = df['Pago_atiempo']
-
-    # definir variables (basadas en X antes de pipeline)
-    num_features = X.select_dtypes(include=['number']).columns.tolist()
-    cat_features = X.select_dtypes(include=['object']).columns.tolist()
-
-    # pipeline de limpieza
-    cleaner = CustomCleaner()
-
-    # pipeline numéricas 
-    num_transformer = Pipeline(steps=[
-        ('imputer', SimpleImputer(strategy='median')),
-        ('scaler', StandardScaler())
-    ])
-        # Crear OneHotEncoder compatible con distintas versiones de sklearn
-    try:
-        # versiones nuevas (sklearn >= 1.2)
-        ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
-    except TypeError:
-        # versiones antiguas
-        ohe = OneHotEncoder(handle_unknown='ignore', sparse=False)
-    # pipeline categóricas
-    cat_transformer = Pipeline(steps=[
-        ('imputer', SimpleImputer(strategy='most_frequent')),
-        ('encode', ohe)
-    ])
-
-    # combinar
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', num_transformer, num_features),
-            ('cat', cat_transformer, cat_features)
-        ],
-        remainder='drop'  # explícito: descarta columnas no listadas
-    )
-
-    # Pipeline completo
-    pipeline = Pipeline(steps=[
-        ('cleaner', cleaner),
-        ('preprocessor', preprocessor)
-    ])
-
-    # split train/test
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+        X,
+        y,
+        test_size=0.20,
+        random_state=42,
+        stratify=y
     )
 
-    # aplicar preprocesamiento
-    X_train_processed = pipeline.fit_transform(X_train, y_train)
-    X_test_processed = pipeline.transform(X_test)
+    # -----------------------
+    # LIMPIEZA
+    # -----------------------
 
-    return X_train_processed, X_test_processed, y_train, y_test, pipeline
+    X_train_clean = cleaning_pipeline.fit_transform(X_train)
 
+    X_test_clean = cleaning_pipeline.transform(X_test)
+
+    # Recuperar DataFrame
+
+    columnas = NUMERIC_FEATURES + CATEGORICAL_FEATURES
+
+    X_train_clean = pd.DataFrame(
+        X_train_clean,
+        columns=columnas,
+        index=X_train.index
+    )
+
+    X_test_clean = pd.DataFrame(
+        X_test_clean,
+        columns=columnas,
+        index=X_test.index
+    )
+
+    # Convertir nuevamente tipos
+
+    for c in CATEGORICAL_FEATURES:
+        X_train_clean[c] = X_train_clean[c].astype("object")
+        X_test_clean[c] = X_test_clean[c].astype("object")
+
+    for c in NUMERIC_FEATURES:
+        X_train_clean[c] = pd.to_numeric(X_train_clean[c])
+        X_test_clean[c] = pd.to_numeric(X_test_clean[c])
+
+    # -----------------------
+    # PREPROCESAMIENTO ML
+    # -----------------------
+
+    X_train_processed = preprocessing_pipeline.fit_transform(X_train_clean)
+
+    X_test_processed = preprocessing_pipeline.transform(X_test_clean)
+
+    return (
+        X_train_processed,
+        X_test_processed,
+        y_train,
+        y_test,
+        cleaning_pipeline,
+        preprocessing_pipeline
+    )
