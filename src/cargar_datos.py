@@ -17,16 +17,8 @@ def cargarDatos():
     return df
 
 if __name__ == "__main__":
-    # Si se ejecuta este script directamente, carga los datos y muestra las primeras filas
+    # Si se ejecuta este script directamente, carga los datos 
     datos = cargarDatos()
-    print(datos.head())
-    print(datos.columns)
+   
 
-def CargarDatos_Limpios():
-    ruta_actual = os.path.dirname(os.path.abspath(__file__))
-    ruta_proyecto = os.path.dirname(ruta_actual)
-    ruta_excel = os.path.join(ruta_proyecto, "df_limpio.xlsx")
-    df = pd.read_excel(ruta_excel)
-    print(df)
-    return df
 
