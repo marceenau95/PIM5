@@ -6,7 +6,8 @@ import os
 from scipy.stats import ks_2samp, chi2_contingency
 
 # Importar funciones propias
-from ft_engineering import build_pipeline, NUMERIC_FEATURES, CATEGORICAL_FEATURES   # usamos solo procesamiento
+from src.ft_engineering import build_pipeline, NUMERIC_FEATURES, CATEGORICAL_FEATURES   # usamos solo procesamiento
+from src.cargar_datos import cargarDatos
 
 # -------------------------------
 # Funciones auxiliares
@@ -54,7 +55,7 @@ def format_pvalue(p_value):
 st.title("📈 Monitoreo de Data Drift")
 
 # Dataset histórico usando cargarDatos()
-df_hist = pd.read_excel('Base_de_datos.xlsx')
+df_hist = cargarDatos()
 
 # Intentar leer dataset nuevo desde ruta relativa
 ruta_relativa = os.path.join(os.path.dirname(__file__), "..", "Base_de_datos_con_Data_Drift_Simulado.xlsx")
